@@ -6,6 +6,7 @@ This is a simple daemon that keeps track of your screentime in dwl. It works by 
 - Screentime is reset at midnight
 - Ability to restore screentime if the file already exists; this is useful in case screentimed gets terminated
 - An archive of daily screentimes is kept in ~/.local/share/screentime by default
+- Ability to control the name of an app based on appid/title; see the Mappings section
 
 ### Quick start
 #### 1. Compile and install screentime and screentimed
@@ -43,3 +44,26 @@ Total       4m33s
 Firefox     4m29s
 foot           4s
 ```
+
+### Mappings
+Mappings allow you to control the name of an app as it appears in /tmp/screentime; for example, you can rename Firefox to Web Browser. This is done based on the appid and window title of the app:
+```c
+const struct mapping mappings[] = {
+    { "foot",  "foot",  "Terminal" },
+};
+```
+The first and second field dictate the appid and window title that will be matched, respectively. The third field is the app name as it appears in /tmp/screentime and can be whatever you like.
+
+In the above example, time spent in any window with an appid of "foot" *and* a title of "foot" will appear next to "Terminal" in /tmp/screentime.
+
+By default, the appid of the focused window is used.
+
+To obtain the appid and title of an app, simply run `cat` on `/tmp/dwl/appid` and `/tmp/dwl/title` (writeinfo.patch must be applied for this to work). Make sure to focus the desired window before running `cat`; an option is to run `sleep 5` beforehand.
+
+`NULL` acts as a wildcard:
+```c
+const struct mapping mappings[] = {
+    { "foot",  NULL,  "Terminal" },
+};
+```
+Any window with an appid of "foot" will appear as "Terminal" in this case, regardless of the window title. Setting both fields to NULL is also possible, but not very useful (all apps will appear under one single entry).
