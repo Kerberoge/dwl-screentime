@@ -3,7 +3,8 @@ PREFIX = ~/.local
 USER = $(shell echo $$USER)
 CFLAGS = -DUSER=\"$(USER)\"
 
-screentimed: screentimed.c
+screentimed: config.h screentimed.c
+	$(CC) $(CFLAGS) screentimed.c -o $@
 
 clean:
 	rm screentimed

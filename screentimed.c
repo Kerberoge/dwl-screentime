@@ -17,23 +17,28 @@ struct app_time {
 	unsigned int time_ms;
 };
 
-const char *appid_path = "/tmp/dwl/appid";
-const char *scrtime_path = "/tmp/screentime";
-const char *archive_path = "/home/" USER "/.local/share/screentime";
+struct mapping {
+	char *appid;
+	char *title;
+	char *appname;
+};
+
 struct app_time times[MAX_APPS] = {0};
-char curr_appid[STR_MAX];
+char curr_appid[STR_MAX], curr_title[STR_MAX];
 struct timespec start = {0}, end = {0};
 time_t next_midnight;
 
+#include "config.h"
 
-void increase_app_time(const char *appid, unsigned int time_ms) {
+
+void increase_app_time(const char *name, unsigned int time_ms) {
 	for (int i = 0; i < MAX_APPS; i++) {
 		if (times[i].name[0] == '\0') {
 			/* end of list reached; create new entry */
-			strcpy(times[i].name, appid);
+			strcpy(times[i].name, name);
 			times[i].time_ms = time_ms;
 			break;
-		} else if (strcmp(times[i].name, appid) == 0) {
+		} else if (strcmp(times[i].name, name) == 0) {
 			/* match found; add time to existing value */
 			times[i].time_ms += time_ms;
 			break;
@@ -58,7 +63,7 @@ int comp(const void *a, const void *b) {
 	return ((struct app_time *) a)->time_ms < ((struct app_time *) b)->time_ms;
 }
 
-void ms_to_str(char *str, const unsigned int time_ms) {
+void ms_to_str(char *str, unsigned int time_ms) {
 	unsigned int time_s;
 	int h, m, s;
 
@@ -97,6 +102,23 @@ unsigned int str_to_ms(const char *time) {
 	time_ms = (h * 3600 + m * 60 + s) * 1000;
 
 	return time_ms;
+}
+
+const char *get_app_name(const char *appid, const char *title) {
+	/* perform a match agains the mappings matrix */
+	const struct mapping *m;
+	int nitems = sizeof(mappings) / sizeof(mappings[0]);
+	char *appname = NULL;
+
+	for (m = mappings; m < mappings + nitems; m++) {
+		if ((m->appid && strcmp(m->appid, appid) == 0 || !m->appid) &&
+				(m->title && strcmp(m->title, title) == 0 || !m->title)) {
+			appname = m->appname;
+			break;
+		}
+	}
+
+	return appname ? appname : appid;
 }
 
 void get_file_contents(char *str, const char *path) {
@@ -171,16 +193,13 @@ void save_times(void) {
 }
 
 void app_switch(void) {
-	char new_appid[STR_MAX];
+	const char *appname;
 	struct timespec diff_ts;
 	unsigned int diff_ms;
+	char new_appid[STR_MAX], new_title[STR_MAX];
 	time_t now = time(NULL);
 
-	get_file_contents(new_appid, appid_path);
-
-	if (strcmp(new_appid, "none") == 0)
-		strcpy(new_appid, "Desktop");
-
+	appname = get_app_name(curr_appid, curr_title);
 	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 
 	if (start.tv_sec > 0 && start.tv_nsec > 0) { /* ignore first run */
@@ -188,11 +207,14 @@ void app_switch(void) {
 		diff_ts.tv_nsec = end.tv_nsec - start.tv_nsec;
 		diff_ms = diff_ts.tv_sec * 1e3 + diff_ts.tv_nsec / 1e6;
 		
-		increase_app_time(curr_appid, diff_ms);
+		increase_app_time(appname, diff_ms);
 	}
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	get_file_contents(new_appid, appid_path);
+	get_file_contents(new_title, title_path);
 	strcpy(curr_appid, new_appid);
+	strcpy(curr_title, new_title);
 	
 	if (now >= next_midnight) {
 		next_midnight = get_next_midnight();
