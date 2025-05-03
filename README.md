@@ -67,3 +67,23 @@ const struct mapping mappings[] = {
 };
 ```
 Any window with an appid of "foot" will appear as "Terminal" in this case, regardless of the window title. Setting both fields to NULL is also possible, but not very useful (all apps will appear under one single entry).
+
+### Pro tip!
+If you use a text editor like Neovim in your terminal emulator, but still want it to appear as a separate app in /tmp/screentime, add this to `init.vim`:
+```vim
+function SetTitle(title)
+	call chansend(v:stderr, "\e]2;" . a:title . "\x07")
+endfunction
+
+autocmd VimEnter * call SetTitle("Neovim")
+autocmd VimLeave * call SetTitle("foot")
+```
+This will dynamically change the window title when you enter and exit Neovim, using OSC escape sequences.
+
+Also add this mapping:
+```c
+const struct mapping mappings[] = {
+    { "foot",  "Neovim",  "Neovim" },
+};
+```
+Neovim will appear as a separate entry now!
