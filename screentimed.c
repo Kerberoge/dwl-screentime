@@ -243,14 +243,17 @@ void stop_recording(void) {
 }
 
 void main_loop(void) {
-	int ifd = inotify_init();
-	int file_watch = inotify_add_watch(ifd, appid_path, IN_CLOSE_WRITE);
+	int ifd, file_watch;
 	struct inotify_event iev;
 	struct pollfd pfd = { .fd = ifd, .events = POLLIN };
 	time_t now = time(NULL);
 	int timeout = (next_midnight - now + 1) * 1e3; /* +1s for safety */
 	int ret;
 
+	ifd = inotify_init();
+	/* title gets updated last, so watch title instead of appid
+	 * to make sure that both are up-to-date */
+	file_watch = inotify_add_watch(ifd, title_path, IN_CLOSE_WRITE);
 	start_recording();
 
 	while (!quit) {
