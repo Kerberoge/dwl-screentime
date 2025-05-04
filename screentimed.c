@@ -4,6 +4,8 @@
 #include <string.h>
 #include <time.h>
 #include <signal.h>
+#include <poll.h>
+#include <errno.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 
@@ -26,6 +28,8 @@ struct app_time times[MAX_APPS] = {0};
 char curr_appid[STR_MAX], curr_title[STR_MAX];
 struct timespec start = {0}, end = {0};
 time_t next_midnight;
+int quit = 0, write_now = 0, paused = 0;
+const char *paused_msg = "Screentime recording is paused";
 
 #include "config.h"
 
@@ -125,6 +129,9 @@ int get_next_midnight(void) {
 }
 
 void increase_app_time(const char *name, unsigned int time_ms) {
+	if (paused)
+		return;
+
 	for (int i = 0; i < MAX_APPS; i++) {
 		if (times[i].name[0] == '\0') {
 			/* end of list reached; create new entry */
@@ -169,21 +176,28 @@ void write_times(const char *path) {
 		ms_to_str(fmt_time, times[i].time_ms);
 		fprintf(f, "%-*s %9s\n", maxlen, times[i].name, fmt_time);
 	}
+
+	if (paused)
+		fprintf(f, "\n%s\n", paused_msg);
+
 	fclose(f);
 }
 
 void load_times(void) {
 	FILE *scrtime_f = fopen(scrtime_path, "r");
-	char appid[STR_MAX], timestr[10];
+	char buf[100], name[STR_MAX], timestr[10];
 	unsigned int time_ms;
 
 	if (!scrtime_f)
 		return;
 
-	while (fscanf(scrtime_f, "%s %s", appid, timestr) > 0) {
-		if (strcmp(appid, "Total") != 0) {
+	while (fgets(buf, sizeof(buf), scrtime_f)) {
+		if (strncmp(buf, paused_msg, sizeof(paused_msg)) == 0) {
+			paused = 1;
+		} else if (sscanf(buf, "%s %s", name, timestr) == 2
+				&& strcmp(name, "Total") != 0) {
 			time_ms = str_to_ms(timestr);
-			increase_app_time(appid, time_ms);
+			increase_app_time(name, time_ms);
 		}
 	}
 	fclose(scrtime_f);
@@ -207,64 +221,97 @@ void save_times(void) {
 	write_times(path);
 }
 
-void app_switch(void) {
-	const char *appname;
-	struct timespec diff_ts;
-	unsigned int diff_ms;
-	char new_appid[STR_MAX], new_title[STR_MAX];
-	time_t now = time(NULL);
-
-	appname = get_app_name(curr_appid, curr_title);
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
-
-	if (start.tv_sec > 0 && start.tv_nsec > 0) { /* ignore first run */
-		diff_ts.tv_sec = end.tv_sec - start.tv_sec;
-		diff_ts.tv_nsec = end.tv_nsec - start.tv_nsec;
-		diff_ms = diff_ts.tv_sec * 1e3 + diff_ts.tv_nsec / 1e6;
-		
-		increase_app_time(appname, diff_ms);
-	}
-
+void start_recording(void) {
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	get_file_contents(new_appid, appid_path);
-	get_file_contents(new_title, title_path);
-	strcpy(curr_appid, new_appid);
-	strcpy(curr_title, new_title);
-	
-	if (now >= next_midnight) {
-		next_midnight = get_next_midnight();
-		save_times(); /* this implies a call to write_times() */
-
-		for (int i = 0; i < MAX_APPS; i++) {
-			times[i].name[0] = '\0';
-			times[i].time_ms = 0;
-		}
-	} else {
-		write_times(scrtime_path);
-	}
+	get_file_contents(curr_appid, appid_path);
+	get_file_contents(curr_title, title_path);
 }
 
-void watch_file(const char *path, void (*callback)()) {
-	int fd = inotify_init();
-	int file_watch = inotify_add_watch(fd, path, IN_CLOSE_WRITE);
-	struct inotify_event event;
+void stop_recording(void) {
+	struct timespec diff_ts;
+	unsigned int diff_ms;
+	const char *appname;
 
-	while (read(fd, &event, sizeof(event))) {
-		callback();
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	diff_ts.tv_sec = end.tv_sec - start.tv_sec;
+	diff_ts.tv_nsec = end.tv_nsec - start.tv_nsec;
+	diff_ms = diff_ts.tv_sec * 1e3 + diff_ts.tv_nsec / 1e6;
+
+	appname = get_app_name(curr_appid, curr_title);
+	
+	increase_app_time(appname, diff_ms);
+}
+
+void main_loop(void) {
+	int ifd = inotify_init();
+	int file_watch = inotify_add_watch(ifd, appid_path, IN_CLOSE_WRITE);
+	struct inotify_event iev;
+	struct pollfd pfd = { .fd = ifd, .events = POLLIN };
+	time_t now = time(NULL);
+	int timeout = (next_midnight - now + 1) * 1e3; /* +1s for safety */
+	int ret;
+
+	start_recording();
+
+	while (!quit) {
+		ret = poll(&pfd, 1, timeout);
+
+		if (ret > 0 && pfd.revents == POLLIN) {
+			read(ifd, &iev, sizeof(iev));
+
+			if (iev.wd == file_watch && iev.mask == IN_CLOSE_WRITE) {
+				/* window focus changed */
+				stop_recording();
+				start_recording();
+			}
+		} else if (ret == 0) { /* midnight has come */
+			stop_recording();
+			save_times();
+
+			for (int i = 0; i < MAX_APPS; i++) {
+				times[i].name[0] = '\0';
+				times[i].time_ms = 0;
+			}
+
+			next_midnight = get_next_midnight();
+			start_recording();
+		} else if (ret == -1 && errno == EINTR) { /* caught signal */
+			if (write_now == 1) {
+				stop_recording();
+				write_times(scrtime_path);
+				start_recording();
+				write_now = 0;
+			} else if (paused) {
+				stop_recording();
+			} else if (!paused) {
+				start_recording();
+			}
+		}
 	}
 
-	close(fd);
+	if (!paused)
+		stop_recording();
+
+	write_times(scrtime_path);
+	close(ifd);
 }
 
 void handler(int signal) {
-	/* force a write */
-	app_switch();
+	if (signal == SIGINT || signal == SIGTERM)
+		quit = 1;
+	else if (signal == SIGUSR1) /* force a write */
+		write_now = 1;
+	else if (signal == SIGUSR2) /* pause/resume */
+		paused = !paused;
 }
 
 int main() {
+	signal(SIGINT, handler);
+	signal(SIGTERM, handler);
 	signal(SIGUSR1, handler);
+	signal(SIGUSR2, handler);
 
 	next_midnight = get_next_midnight();
 	load_times();
-	watch_file(appid_path, app_switch);
+	main_loop();
 }
