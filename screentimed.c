@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <string.h>
-#include <time.h>
 #include <signal.h>
+#include <time.h>
 #include <poll.h>
 #include <errno.h>
+#include <sys/timerfd.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 
@@ -27,9 +29,7 @@ struct mapping {
 struct app_time times[MAX_APPS] = {0};
 char curr_appid[STR_MAX], curr_title[STR_MAX];
 struct timespec start = {0}, end = {0};
-time_t next_midnight;
 int quit = 0, write_now = 0, paused = 0;
-const char *paused_msg = "Screentime recording is paused";
 
 #include "config.h"
 
@@ -89,6 +89,20 @@ const char *get_app_name(const char *appid, const char *title) {
 	}
 
 	return appname ? appname : appid;
+}
+
+void get_archive_path(char *path) {
+	struct stat st;
+	time_t now = time(NULL);
+	struct tm lt = *localtime(&now);
+
+	if (stat(archive_dir, &st) == -1)
+		mkdir(archive_dir, 0755);
+
+	lt.tm_mday--;
+	mktime(&lt);
+	sprintf(path, "%s/%04d-%02d-%02d", archive_dir,
+			lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
 }
 
 void get_file_contents(char *str, const char *path) {
@@ -151,11 +165,19 @@ int comp(const void *a, const void *b) {
 	return ((struct app_time *) a)->time_ms < ((struct app_time *) b)->time_ms;
 }
 
-void write_times(const char *path) {
-	FILE *f = fopen(path, "w");
+void write_times(int archive) {
+	FILE *f;
+	char archive_path[100];
 	int maxlen = get_max_appid_len();
 	unsigned int total_time_ms = 0;
 	char fmt_time[10];
+
+	if (archive) {
+		get_archive_path(archive_path);
+		f = fopen(archive_path, "w");
+	} else {
+		f = fopen(scrtime_path, "w");
+	}
 
 	if (!f)
 		return;
@@ -177,48 +199,37 @@ void write_times(const char *path) {
 		fprintf(f, "%-*s %9s\n", maxlen, times[i].name, fmt_time);
 	}
 
-	if (paused)
-		fprintf(f, "\n%s\n", paused_msg);
+	if (!archive) {
+		if (quit)
+			fprintf(f, "\nProgram exited; screentime recording has stopped\n");
+		else if (paused)
+			fprintf(f, "\nScreentime recording is currently paused\n");
+	}
 
 	fclose(f);
 }
 
 void load_times(void) {
 	FILE *scrtime_f = fopen(scrtime_path, "r");
+	int matched, nnl = 0;
 	char buf[100], name[STR_MAX], timestr[10];
 	unsigned int time_ms;
 
 	if (!scrtime_f)
 		return;
 
-	while (fgets(buf, sizeof(buf), scrtime_f)) {
-		if (strncmp(buf, paused_msg, sizeof(paused_msg)) == 0) {
-			paused = 1;
-		} else if (sscanf(buf, "%s %s", name, timestr) == 2
-				&& strcmp(name, "Total") != 0) {
-			time_ms = str_to_ms(timestr);
-			increase_app_time(name, time_ms);
+	/* discard everything after the second empty line */
+	while (fgets(buf, sizeof(buf), scrtime_f) && nnl < 2) {
+		if ((matched = sscanf(buf, "%s %s", name, timestr)) == 2) {
+			if (strcmp(name, "Total") != 0) {
+				time_ms = str_to_ms(timestr);
+				increase_app_time(name, time_ms);
+			}
+		} else if (matched == -1) {
+			nnl++;
 		}
 	}
 	fclose(scrtime_f);
-}
-
-void save_times(void) {
-	/* saves yesterday's times in the archive */
-	struct stat st;
-	time_t now = time(NULL);
-	struct tm lt = *localtime(&now);
-	char path[100];
-
-	if (stat(archive_path, &st) == -1)
-		mkdir(archive_path, 0755);
-
-	lt.tm_mday--;
-	mktime(&lt);
-	sprintf(path, "%s/%04d-%02d-%02d", archive_path,
-			lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
-
-	write_times(path);
 }
 
 void start_recording(void) {
@@ -242,46 +253,70 @@ void stop_recording(void) {
 	increase_app_time(appname, diff_ms);
 }
 
+void compute_timeout(struct itimerspec *it) {
+	time_t now, next_midnight;
+	int diff;
+
+	now = time(NULL);
+	next_midnight = get_next_midnight();
+	diff = next_midnight - now + 1; /* +1s to be safe */
+
+	it->it_interval = (struct timespec) { .tv_sec = 0, .tv_nsec = 0 };
+	it->it_value = (struct timespec) { .tv_sec = diff, .tv_nsec = 0 };
+}
+
+void clear_history(void) {
+	for (int i = 0; i < MAX_APPS; i++) {
+		times[i].name[0] = '\0';
+		times[i].time_ms = 0;
+	}
+}
+
 void main_loop(void) {
-	int ifd, file_watch;
+	enum { TIMER, INOTIFY };
+	struct pollfd pfds[2];
+	struct itimerspec timeout;
+	uint64_t expirations;
+	int file_watch;
 	struct inotify_event iev;
-	struct pollfd pfd = { .fd = ifd, .events = POLLIN };
-	time_t now = time(NULL);
-	int timeout = (next_midnight - now + 1) * 1e3; /* +1s for safety */
 	int ret;
 
-	ifd = inotify_init();
+	pfds[TIMER].fd = timerfd_create(CLOCK_BOOTTIME, 0);
+	pfds[TIMER].events = POLLIN;
+
+	pfds[INOTIFY].fd = inotify_init();
 	/* title gets updated last, so watch title instead of appid
 	 * to make sure that both are up-to-date */
-	file_watch = inotify_add_watch(ifd, title_path, IN_CLOSE_WRITE);
+	file_watch = inotify_add_watch(pfds[INOTIFY].fd, title_path, IN_CLOSE_WRITE);
+	pfds[TIMER].events = POLLIN;
+
 	start_recording();
 
 	while (!quit) {
-		ret = poll(&pfd, 1, timeout);
+		compute_timeout(&timeout);
+		timerfd_settime(pfds[TIMER].fd, 0, &timeout, NULL);
+		ret = poll(pfds, 2, -1);
 
-		if (ret > 0 && pfd.revents == POLLIN) {
-			read(ifd, &iev, sizeof(iev));
+		if (ret > 0) {
+			if (pfds[TIMER].revents & POLLIN) { /* midnight has come */
+				read(pfds[TIMER].fd, &expirations, sizeof(expirations));
 
-			if (iev.wd == file_watch && iev.mask == IN_CLOSE_WRITE) {
-				/* window focus changed */
 				stop_recording();
+				write_times(1);
+				clear_history();
 				start_recording();
+			} else if (pfds[INOTIFY].revents & POLLIN) {
+				read(pfds[INOTIFY].fd, &iev, sizeof(iev));
+				if (iev.wd == file_watch && iev.mask == IN_CLOSE_WRITE) {
+					/* window focus changed */
+					stop_recording();
+					start_recording();
+				}
 			}
-		} else if (ret == 0) { /* midnight has come */
-			stop_recording();
-			save_times();
-
-			for (int i = 0; i < MAX_APPS; i++) {
-				times[i].name[0] = '\0';
-				times[i].time_ms = 0;
-			}
-
-			next_midnight = get_next_midnight();
-			start_recording();
 		} else if (ret == -1 && errno == EINTR) { /* caught signal */
 			if (write_now == 1) {
 				stop_recording();
-				write_times(scrtime_path);
+				write_times(0);
 				start_recording();
 				write_now = 0;
 			} else if (paused) {
@@ -295,8 +330,9 @@ void main_loop(void) {
 	if (!paused)
 		stop_recording();
 
-	write_times(scrtime_path);
-	close(ifd);
+	write_times(0);
+	close(pfds[TIMER].fd);
+	close(pfds[INOTIFY].fd);
 }
 
 void handler(int signal) {
@@ -314,7 +350,6 @@ int main() {
 	signal(SIGUSR1, handler);
 	signal(SIGUSR2, handler);
 
-	next_midnight = get_next_midnight();
 	load_times();
 	main_loop();
 }
