@@ -10,7 +10,6 @@
 #define MAX_APPS 20
 #define STR_MAX 20
 
-
 struct app_time {
 	char name[STR_MAX];
 	struct timespec time;
@@ -29,39 +28,6 @@ struct timespec start = {0}, end = {0};
 time_t next_midnight;
 
 #include "config.h"
-
-
-void increase_app_time(const char *name, unsigned int time_ms) {
-	for (int i = 0; i < MAX_APPS; i++) {
-		if (times[i].name[0] == '\0') {
-			/* end of list reached; create new entry */
-			strcpy(times[i].name, name);
-			times[i].time_ms = time_ms;
-			break;
-		} else if (strcmp(times[i].name, name) == 0) {
-			/* match found; add time to existing value */
-			times[i].time_ms += time_ms;
-			break;
-		}
-		/* Note: no new entries are added if the array is full and contains no match */
-	}
-}
-
-int get_max_appid_len(void) {
-	int len, maxlen = 0;
-
-	for (int i = 0; i < MAX_APPS; i++) {
-		len = strlen(times[i].name);
-		if (len > maxlen)
-			maxlen = len;
-	}
-
-	return maxlen;
-}
-
-int comp(const void *a, const void *b) {
-	return ((struct app_time *) a)->time_ms < ((struct app_time *) b)->time_ms;
-}
 
 void ms_to_str(char *str, unsigned int time_ms) {
 	unsigned int time_s;
@@ -131,6 +97,53 @@ void get_file_contents(char *str, const char *path) {
 	fclose(f);
 }
 
+int get_max_appid_len(void) {
+	int len, maxlen = 0;
+
+	for (int i = 0; i < MAX_APPS; i++) {
+		len = strlen(times[i].name);
+		if (len > maxlen)
+			maxlen = len;
+	}
+
+	return maxlen;
+}
+
+int get_next_midnight(void) {
+	time_t now = time(NULL), next_midnight;
+	struct tm nm = *localtime(&now);
+
+	nm.tm_mday++;
+	mktime(&nm); /* fix out of range values; see https://stackoverflow.com/a/4214968 */
+
+	nm.tm_hour = 0;
+	nm.tm_min = 0;
+	nm.tm_sec = 0;
+	next_midnight = mktime(&nm);
+
+	return next_midnight;
+}
+
+void increase_app_time(const char *name, unsigned int time_ms) {
+	for (int i = 0; i < MAX_APPS; i++) {
+		if (times[i].name[0] == '\0') {
+			/* end of list reached; create new entry */
+			strcpy(times[i].name, name);
+			times[i].time_ms = time_ms;
+			break;
+		} else if (strcmp(times[i].name, name) == 0) {
+			/* match found; add time to existing value */
+			times[i].time_ms += time_ms;
+			break;
+		}
+		/* Note: no new entries are added if the array is full and contains no match */
+	}
+}
+
+int comp(const void *a, const void *b) {
+	return ((struct app_time *) a)->time_ms < ((struct app_time *) b)->time_ms;
+}
+
 void write_times(const char *path) {
 	FILE *f = fopen(path, "w");
 	int maxlen = get_max_appid_len();
@@ -159,19 +172,21 @@ void write_times(const char *path) {
 	fclose(f);
 }
 
-int get_next_midnight(void) {
-	time_t now = time(NULL), next_midnight;
-	struct tm nm = *localtime(&now);
+void load_times(void) {
+	FILE *scrtime_f = fopen(scrtime_path, "r");
+	char appid[STR_MAX], timestr[10];
+	unsigned int time_ms;
 
-	nm.tm_mday++;
-	mktime(&nm); /* fix out of range values; see https://stackoverflow.com/a/4214968 */
+	if (!scrtime_f)
+		return;
 
-	nm.tm_hour = 0;
-	nm.tm_min = 0;
-	nm.tm_sec = 0;
-	next_midnight = mktime(&nm);
-
-	return next_midnight;
+	while (fscanf(scrtime_f, "%s %s", appid, timestr) > 0) {
+		if (strcmp(appid, "Total") != 0) {
+			time_ms = str_to_ms(timestr);
+			increase_app_time(appid, time_ms);
+		}
+	}
+	fclose(scrtime_f);
 }
 
 void save_times(void) {
@@ -229,28 +244,6 @@ void app_switch(void) {
 	}
 }
 
-void handler(int signal) {
-	/* force a write */
-	app_switch();
-}
-
-void load_times(void) {
-	FILE *scrtime_f = fopen(scrtime_path, "r");
-	char appid[STR_MAX], timestr[10];
-	unsigned int time_ms;
-
-	if (!scrtime_f)
-		return;
-
-	while (fscanf(scrtime_f, "%s %s", appid, timestr) > 0) {
-		if (strcmp(appid, "Total") != 0) {
-			time_ms = str_to_ms(timestr);
-			increase_app_time(appid, time_ms);
-		}
-	}
-	fclose(scrtime_f);
-}
-
 void watch_file(const char *path, void (*callback)()) {
 	int fd = inotify_init();
 	int file_watch = inotify_add_watch(fd, path, IN_CLOSE_WRITE);
@@ -261,6 +254,11 @@ void watch_file(const char *path, void (*callback)()) {
 	}
 
 	close(fd);
+}
+
+void handler(int signal) {
+	/* force a write */
+	app_switch();
 }
 
 int main() {
