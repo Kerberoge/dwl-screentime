@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 
 #define MAX_APPS 20
-#define STR_MAX 20
+#define STR_MAX 200
 
 struct app_time {
 	char name[STR_MAX];
@@ -105,13 +105,13 @@ void get_archive_path(char *path) {
 			lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
 }
 
-void get_file_contents(char *str, const char *path) {
+void get_file_contents(char *str, int size, const char *path) {
 	FILE *f = fopen(path, "r");
 
 	if (!f || !str)
 		return;
 
-	fgets(str, STR_MAX, f);
+	fgets(str, size, f);
 	fclose(f);
 }
 
@@ -167,7 +167,7 @@ int comp(const void *a, const void *b) {
 
 void write_times(int archive) {
 	FILE *f;
-	char archive_path[100];
+	char archive_path[STR_MAX];
 	int maxlen = get_max_appid_len();
 	unsigned int total_time_ms = 0;
 	char fmt_time[10];
@@ -212,7 +212,7 @@ void write_times(int archive) {
 void load_times(void) {
 	FILE *scrtime_f = fopen(scrtime_path, "r");
 	int matched, nnl = 0;
-	char buf[100], name[STR_MAX], timestr[10];
+	char buf[STR_MAX], name[STR_MAX], timestr[10];
 	unsigned int time_ms;
 
 	if (!scrtime_f)
@@ -234,8 +234,8 @@ void load_times(void) {
 
 void start_recording(void) {
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-	get_file_contents(curr_appid, appid_path);
-	get_file_contents(curr_title, title_path);
+	get_file_contents(curr_appid, sizeof(curr_appid), appid_path);
+	get_file_contents(curr_title, sizeof(curr_title), title_path);
 }
 
 void stop_recording(void) {
