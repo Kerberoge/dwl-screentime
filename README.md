@@ -2,11 +2,12 @@
 This is a simple daemon that keeps track of your screentime in dwl. It works by querying the appid of the currently focused window; stats are saved to a file of your choice in /tmp (/tmp/screentime by default).
 
 ### Features
-- Updates only on window focus changes or when `screentime` is run, to conserve computing resources
+- Updates only when `screentime` is run, to conserve computing resources
 - Screentime is reset at midnight
-- Ability to restore screentime if the file already exists; this is useful in case screentimed gets terminated
+- Screentime is restored if the file already exists; this is useful in case screentimed gets terminated
 - An archive of daily screentimes is kept in ~/.local/share/screentime by default
-- Ability to control the name of an app based on appid/title; see the Mappings section
+- Screentime recording can be paused; see the Pausing section
+- The name of an app can be controlled based on appid/title; see the Mappings section
 
 ### Quick start
 #### 1. Compile and install screentime and screentimed
@@ -44,6 +45,11 @@ Total       4m33s
 Firefox     4m29s
 foot           4s
 ```
+
+### Pausing
+screentimed allows you to pause screentime recording, which means that usage times are no longer incremented. This is useful when you turn off the screen for example. Simply run `pkill -USR2 screentimed` to inform the program that it should pause/resume its usage tracking. When paused, `screentime` will display an additional message informing you that screentime recording is paused.
+
+**Note**: it is *not* necessary to pause screentimed before entering suspend mode, since it is clever enough to detect that. It has to do with how it measures usage times of apps; these do not include time spent in suspend mode.
 
 ### Mappings
 Mappings allow you to control the name of an app as it appears in /tmp/screentime; for example, you can rename Firefox to Web Browser. This is done based on the appid and window title of the app:
